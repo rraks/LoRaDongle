@@ -35,12 +35,13 @@ int set_interface_attribs(int fd, int speed)
 
     /* setup for non-canonical mode */
     tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
-    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+    tty.c_lflag &= ~(ECHO | ECHONL  | ISIG | IEXTEN);
+    tty.c_lflag |= ICANON;
     tty.c_oflag &= ~OPOST;
 
     /* fetch bytes as they become available */
     tty.c_cc[VMIN] = 1;
-    tty.c_cc[VTIME] = 1;
+    tty.c_cc[VTIME] = 0;
 
     if (tcsetattr(fd, TCSANOW, &tty) != 0) {
         printf("Error from tcsetattr: %s\n", strerror(errno));
@@ -70,14 +71,14 @@ int open_serial(const uint8_t * portname)
     const uint8_t *port = portname;
     int fd;
     // to access serial port on linux, you need to open file.
-    fd = open(port, O_RDWR | O_NOCTTY | O_SYNC);
+    fd = open(port, O_RDWR | O_NOCTTY | O_SYNC );
     if (fd < 0) {
         printf("Error opening %s: %s\n", portname, strerror(errno));
         return -1;
     }
     /*baudrate 115200, 8 bits, no parity, 1 stop bit */
     set_interface_attribs(fd, B115200);
-    //set_mincount(fd, 0);                /* set to pure timed read */
+   // set_mincount(fd, 1);                /* set to pure timed read */
     return fd;
 }
 
@@ -85,13 +86,14 @@ int open_serial(const uint8_t * portname)
 *   Read data from serial port into buffer array.  fd is int returned from open_serial.
 */
 
-int read_serial(int fd, unsigned char *buffer)
+int read_serial(int fd, unsigned char *buffer, int maxlen)
 {
+
 	/* Loop until data is read */
 	do {
 		int rdlen;
 
-		rdlen = read(fd, buffer, sizeof(buffer) - 1);
+		rdlen = read(fd, buffer, maxlen);
 		if (rdlen > 0) {
 
 			buffer[rdlen] = 0;

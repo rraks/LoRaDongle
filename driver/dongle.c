@@ -11,7 +11,7 @@
 
 
 uint8_t isCommIfaceSet = 0;
-
+uint8_t sessionActive = 0;
 
 /*!
  * Encryption aBlock and sBlock
@@ -178,9 +178,9 @@ void ComputeMic( const uint8_t *buffer, uint16_t size, const uint8_t *key, uint3
 void AuthenticateDongle()
 {
 
-	uint8_t *authString = malloc(15*sizeof(uint8_t));
+	uint8_t authString[15];// = malloc(15*sizeof(uint8_t));
 	uint8_t encAuthString[19];
-	uint8_t *b64encAuthString = malloc(25*sizeof(uint8_t));
+	uint8_t b64encAuthString[25]; // = malloc(25*sizeof(uint8_t));
 	uint8_t *recB64encAuthString = malloc(25*sizeof(uint8_t));
 
 
@@ -196,8 +196,8 @@ void AuthenticateDongle()
 
 
 
-	memcpy(authString+1, dongleID, 8*sizeof(uint8_t));
-	memcpy((authString+1)+8*sizeof(uint8_t), gatewayID, 6*sizeof(uint8_t));
+	memcpy(&authString[1], dongleID, 8*sizeof(uint8_t));
+	memcpy((&authString[1])+8*sizeof(uint8_t), gatewayID, 6*sizeof(uint8_t));
 
 	shflidx = shuffleStr(authString,14);
 	memcpy(authString,&shflidx, 1*sizeof(uint8_t));
@@ -205,10 +205,10 @@ void AuthenticateDongle()
     PayloadEncrypt( authString, 15, dongleKey, 0, 0, 0, encAuthString);
     ComputeMic(encAuthString, 15, dongleKey, 0, 0, 0, &mic);
 
-    encAuthString[16] = mic & 0xFF;
-    encAuthString[17] = ( mic >> 8 ) & 0xFF;
-    encAuthString[18] = ( mic >> 16 ) & 0xFF;
-    encAuthString[19] = ( mic >> 24 ) & 0xFF;
+    encAuthString[15] = mic & 0xFF;
+    encAuthString[16] = ( mic >> 8 ) & 0xFF;
+    encAuthString[17] = ( mic >> 16 ) & 0xFF;
+    encAuthString[18] = ( mic >> 24 ) & 0xFF;
 
     b64len = b64_encode(encAuthString, 19, b64encAuthString);
 
@@ -217,29 +217,26 @@ void AuthenticateDongle()
 
     	write = write_serial(fd, b64encAuthString, b64len);
     	write = write_serial(fd, "\n", 1);
-    //	memset(encAuthString, 0, 18*sizeof(uint8_t));
-	   // b64len = b64_decode(b64encAuthString, b64len, encAuthString);
 
+    	memset(encAuthString, 0, 18*sizeof(uint8_t));
+    	memset(b64encAuthString, 0, 25*sizeof(uint8_t));
+    	memset(authString, 0, 15*sizeof(uint8_t));
 
-//    	    memset(b64encAuthString, 0, 25*sizeof(uint8_t));
+    	serlen = read_serial(fd, b64encAuthString, 25); // Blocking read Ack from dongle
 
-    	   // serlen = read_serial(fd, recB64encAuthString); // Blocking read Ack from dongle
+    	b64len = b64_decode(b64encAuthString, serlen-1, encAuthString);
+    	PayloadDecrypt( encAuthString, 15, dongleKey, 0, 0, 0, authString);
 
-//
-//    	    b64len = b64_decode(b64encAuthString, b64len, encAuthString);
-//
-//    	    ComputeMic(encAuthString, b64len-4, dongleKey, 0, 0, 0, &mic);
-//    	    micRx |= ( uint32_t )encAuthString[b64len-3];
-//    	    micRx |= ( ( uint32_t )encAuthString[b64len-2] << 8 );
-//    		micRx |= ( ( uint32_t )encAuthString[b64len-1] << 16 );
-//    		micRx |= ( ( uint32_t )encAuthString[b64len] << 24 );
-//
-//    		if( mic == micRx ){
-//
-//
-//
-//    		}
-//
+		ComputeMic(encAuthString, b64len-4, dongleKey, 0, 0, 0, &mic);
+		micRx |= ( uint32_t )encAuthString[b64len-3];
+		micRx |= ( ( uint32_t )encAuthString[b64len-2] << 8 );
+		micRx |= ( ( uint32_t )encAuthString[b64len-1] << 16 );
+		micRx |= ( ( uint32_t )encAuthString[b64len] << 24 );
+
+		if( mic == micRx ){
+			sessionActive = 1;
+		}
+
 
     }
 

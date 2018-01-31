@@ -48,6 +48,7 @@
  * \param [OUT] mic             - Computed MIC field
  */
 void LoRaMacComputeMic( const uint8_t *buffer, uint16_t size, const uint8_t *key, uint32_t address, uint8_t dir, uint32_t sequenceCounter, uint32_t *mic );
+void DongleComputeMic( const uint8_t *buffer, uint16_t size, const uint8_t *key, uint32_t address, uint8_t dir, uint32_t sequenceCounter, uint32_t *mic );
 
 /*!
  * Computes the LoRaMAC payload encryption
@@ -61,6 +62,7 @@ void LoRaMacComputeMic( const uint8_t *buffer, uint16_t size, const uint8_t *key
  * \param [OUT] encBuffer       - Encrypted buffer
  */
 void LoRaMacPayloadEncrypt( const uint8_t *buffer, uint16_t size, const uint8_t *key, uint32_t address, uint8_t dir, uint32_t sequenceCounter, uint8_t *encBuffer );
+void DonglePayloadEncrypt( const uint8_t *buffer, uint16_t size, const uint8_t *key, uint32_t address, uint8_t dir, uint32_t sequenceCounter, uint8_t *encBuffer );
 
 /*!
  * Computes the LoRaMAC payload decryption
@@ -74,6 +76,7 @@ void LoRaMacPayloadEncrypt( const uint8_t *buffer, uint16_t size, const uint8_t 
  * \param [OUT] decBuffer       - Decrypted buffer
  */
 void LoRaMacPayloadDecrypt( const uint8_t *buffer, uint16_t size, const uint8_t *key, uint32_t address, uint8_t dir, uint32_t sequenceCounter, uint8_t *decBuffer );
+void DonglePayloadDecrypt( const uint8_t *buffer, uint16_t size, const uint8_t *key, uint32_t address, uint8_t dir, uint32_t sequenceCounter, uint8_t *decBuffer );
 
 /*!
  * Computes the LoRaMAC Join Request frame MIC field

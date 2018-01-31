@@ -117,6 +117,35 @@ void LoRaMacComputeMic( const uint8_t *buffer, uint16_t size, const uint8_t *key
     *mic = ( uint32_t )( ( uint32_t )Mic[3] << 24 | ( uint32_t )Mic[2] << 16 | ( uint32_t )Mic[1] << 8 | ( uint32_t )Mic[0] );
 }
 
+void DongleComputeMic( const uint8_t *buffer, uint16_t size, const uint8_t *key, uint32_t address, uint8_t dir, uint32_t sequenceCounter, uint32_t *mic )
+{
+    MicBlockB0[5] = dir;
+
+    MicBlockB0[6] = ( address ) & 0xFF;
+    MicBlockB0[7] = ( address >> 8 ) & 0xFF;
+    MicBlockB0[8] = ( address >> 16 ) & 0xFF;
+    MicBlockB0[9] = ( address >> 24 ) & 0xFF;
+
+    MicBlockB0[10] = ( sequenceCounter ) & 0xFF;
+    MicBlockB0[11] = ( sequenceCounter >> 8 ) & 0xFF;
+    MicBlockB0[12] = ( sequenceCounter >> 16 ) & 0xFF;
+    MicBlockB0[13] = ( sequenceCounter >> 24 ) & 0xFF;
+
+    MicBlockB0[15] = size & 0xFF;
+
+    AES_CMAC_Init( AesCmacCtx );
+
+    AES_CMAC_SetKey( AesCmacCtx, key );
+
+    AES_CMAC_Update( AesCmacCtx, MicBlockB0, LORAMAC_MIC_BLOCK_B0_SIZE );
+
+    AES_CMAC_Update( AesCmacCtx, buffer, size & 0xFF );
+
+    AES_CMAC_Final( Mic, AesCmacCtx );
+
+    *mic = ( uint32_t )( ( uint32_t )Mic[3] << 24 | ( uint32_t )Mic[2] << 16 | ( uint32_t )Mic[1] << 8 | ( uint32_t )Mic[0] );
+}
+
 
 
 void LoRaMacPayloadEncrypt( const uint8_t *buffer, uint16_t size, const uint8_t *key, uint32_t address, uint8_t dir, uint32_t sequenceCounter, uint8_t *encBuffer )

@@ -14,15 +14,14 @@
  */
 #include <string.h>
 #include <math.h>
+#include <time.h>
 #include "board.h"
 
 #include "LoRaMac.h"
+#include "LoRaMacCrypto.h"
+#include "uart-board.h"
 #include "Commissioning.h"
-
-#include <pb_encode.h>
-#include <pb_decode.h>
-//#include "sensed.pb.h"
-//#include "actuated.pb.h"
+#include "base64.h"
 
 /*!
  * Defines the application data transmission duty cycle. 5s, value in [ms].
@@ -161,7 +160,18 @@ static enum eDeviceState
 	DEVICE_STATE_SLEEP
 }DeviceState;
 
-/*!
+static enum eDonglState
+{
+	DONGLE_STATE_INIT,
+	DONGLE_ENQUEUE,
+	DONGLE_DEQUEUE,
+	DONGLE_STATE_WAIT
+}DongleState;
+
+
+
+#define MFR_LEN   4
+ /*!
  * LoRaWAN compliance tests support data
  */
 struct ComplianceTest_s
@@ -178,14 +188,43 @@ struct ComplianceTest_s
 	uint8_t NbGateways;
 }ComplianceTest;
 
+uint8_t key[16] = LORAWAN_APPLICATION_KEY;
+uint8_t actString[8] = LORAWAN_DEVICE_EUI;
 uint8_t txBuffer[100];
 uint8_t rxBuffer[100];
-
+uint8_t decryptBuffer[100];
+uint8_t payloadBuffer[100];
+uint8_t msgBuffer[100];
+uint8_t QBuffer[100];
+uint8_t authString[14];
+uint8_t encString[15];
+uint8_t b64EncString[20];
+uint8_t *addrString;
 uint8_t flag = 0;
+uint8_t sessionEstd = 0;
 
+uint16_t msgLen = 0;
+uint16_t b64Len = 0;
+uint16_t decryptCtr = 0;
+uint16_t address = 0;
+
+uint32_t mic = 0;
+uint32_t micRx = 0;
+
+
+static TimerEvent_t sessionTimer;
 
 
 void UartISR(UartNotifyId_t id);
+uint8_t shuffleStr(uint8_t *dp, uint16_t length, uint16_t shuffleIdx);
+uint8_t isArrEq(uint8_t *authString, uint8_t *actString, uint16_t length);
+uint8_t appendMic(uint8_t *String, uint32_t mic, uint16_t length);
+uint32_t calcMic(uint8_t *buffer, uint16_t length);
+
+
+
+
+static void sessionCallback();
 
 
 /*!f
@@ -309,7 +348,6 @@ static void McpsConfirm(McpsConfirm_t *mcpsConfirm) {
 		default:
 			break;
 		}
-
 	}
 	NextTx = true;
 }
@@ -555,7 +593,6 @@ int main(void) {
 	LoRaMacCallback_t LoRaMacCallbacks;
 	MibRequestConfirm_t mibReq;
 
-
 	BoardInitMcu();
 	BoardInitPeriph();
 
@@ -565,7 +602,7 @@ int main(void) {
 	UartInit(&Uart1, 0, UART_TX, UART_RX);
 	Uart1.IrqNotify = UartISR;
 
-	UartConfig(&Uart1, RX_TX, 9600, UART_8_BIT, UART_1_STOP_BIT, NO_PARITY,
+	UartConfig(&Uart1, RX_TX, 115200, UART_8_BIT, UART_1_STOP_BIT, NO_PARITY,
 			NO_FLOW_CTRL);
 
 	DeviceState = DEVICE_STATE_INIT;
@@ -573,10 +610,89 @@ int main(void) {
 	FifoFlush(&Uart1.FifoRx);
 	FifoFlush(&Uart1.FifoTx);
 
-
 	while (1) {
 
+	switch(DongleState){
 
+	case DONGLE_STATE_INIT: {
+		if(flag == 1){
+			UartGetBuffer(&Uart1,payloadBuffer,100,&msgLen);
+			FifoFlush(&Uart1.FifoRx);
+			flag = 0;
+
+		    b64Len = b64_decode(payloadBuffer,msgLen-1,decryptBuffer);
+
+		    micRx = calcMic(decryptBuffer,b64Len);
+
+			DongleComputeMic(decryptBuffer, b64Len-4, key, address, 0, 0, &mic);
+
+			if(mic == micRx){
+				decryptBuffer[15] = 0;
+				DonglePayloadDecrypt(decryptBuffer, 16, key, 0, 0, 0, msgBuffer);
+				shuffleStr(&msgBuffer[1], b64Len-5, b64Len-5-msgBuffer[0]);
+				memcpy(authString, &msgBuffer[1], 14);
+				if(isArrEq(authString, actString, 8)){
+					DonglePayloadEncrypt(authString+8, 6, key, 0, 0, 0, encString);
+					micRx = 0;
+					DongleComputeMic(encString, 6, key, address, 0, 0, &micRx);
+					appendMic(encString, micRx, 6);
+					b64Len = b64_encode(encString, 10, b64EncString);
+					b64EncString[b64Len] = 10;
+					UartPutBuffer(&Uart1, b64EncString, b64Len+1);
+					HAL_Delay(500);
+
+					msgLen = 0;
+					UartGetBuffer(&Uart1,payloadBuffer,100,&msgLen);
+					FifoFlush(&Uart1.FifoRx);
+					flag = 0;
+
+					b64Len = b64_decode(payloadBuffer,msgLen-1,decryptBuffer);
+
+				    micRx = calcMic(decryptBuffer,b64Len);
+
+					DongleComputeMic(decryptBuffer, b64Len-4, key, address, 0, 0, &mic);
+
+					if(mic == micRx){
+						DonglePayloadDecrypt(decryptBuffer, 6, key, 0, 0, 0, msgBuffer);
+							if(isArrEq(msgBuffer,actString, 6)){
+							sessionEstd = 1;
+						}
+					}
+				}
+				DongleState = DONGLE_ENQUEUE;
+			}
+		}
+		else
+		DongleState = DONGLE_STATE_WAIT;
+		break;
+		}
+	case DONGLE_ENQUEUE: {
+		addrString = appendMic("address", micRx, 4);
+		UartPutBuffer(&Uart1,addrString, 4);
+		// ------ //
+		msgLen = 0;
+		UartGetBuffer(&Uart1, QBuffer, 100, &msgLen);
+		pushQ(QBuffer, QBuffer[msgLen-1]);
+		if("cond" == 1)
+			DongleState = DONGLE_STATE_WAIT;
+		else
+			DongleState = DONGLE_DEQUEUE;
+		break;
+	}
+	case DONGLE_DEQUEUE: {
+		popQ();
+		break;
+	}
+	case DONGLE_STATE_WAIT: {
+		HAL_Delay(100);
+		DongleState = DONGLE_STATE_INIT;
+		break;
+		}
+	default: {
+		DongleState = DONGLE_STATE_INIT;
+		break;
+		}
+	}
 
 	switch (DeviceState) {
 		case DEVICE_STATE_INIT: {
@@ -587,7 +703,6 @@ int main(void) {
 			LoRaMacInitialization(&LoRaMacPrimitives, &LoRaMacCallbacks);
 
 			TimerInit(&TxNextPacketTimer, OnTxNextPacketTimerEvent);
-
 
 			mibReq.Type = MIB_ADR;
 			mibReq.Param.AdrEnable = LORAWAN_ADR_ON;
@@ -724,12 +839,57 @@ void UartISR(UartNotifyId_t id) {
 
 	if (id == UART_NOTIFY_RX) {
 		flag = 1;
+		UartReEnableRx();
 	}
 
 	if (id == UART_NOTIFY_TX) {
 		flag = 0;
-		UartReEnableRx(); // Implicit declaration warning can be ignored
+		UartReEnableRx();
 	}
 
 }
+uint8_t shuffleStr(uint8_t *dp, uint16_t length, uint16_t shuffleIndex){
+				uint8_t *tmpBuf = malloc(length*sizeof(uint8_t));
+				uint16_t j=0;
 
+				srand(time(NULL));
+				if(shuffleIndex == 0){
+					shuffleIndex = rand()%length;
+				}
+				for(j=0;j<length; j++){
+					tmpBuf[(j+shuffleIndex)%length] = dp[j]; //0 is last, 1 is 0, 2 is 1
+				}
+				memcpy(dp, tmpBuf, length);
+				free(tmpBuf);
+				return shuffleIndex;
+}
+
+uint8_t isArrEq(uint8_t *authString, uint8_t *actString, uint16_t length){
+	uint8_t i;
+	for(i = 0; i < length; i++){
+		if(authString[i] != actString[i])
+			return 0;
+	}
+	return 1;
+}
+
+uint32_t calcMic(uint8_t *buffer, uint16_t length){
+	uint32_t compMic = 0;
+	compMic |= ( uint32_t )buffer[length-4];
+	compMic |= ( ( uint32_t )buffer[length-3] << 8 );
+	compMic |= ( ( uint32_t )buffer[length-2] << 16 );
+	compMic |= ( ( uint32_t )buffer[length-1] << 24 );
+	return compMic;
+}
+
+uint8_t appendMic(uint8_t *String, uint32_t mic, uint16_t length){
+	String[length] = mic & 0xFF;
+	String[length+1] = ( mic >> 8 ) & 0xFF;
+	String[length+2] = ( mic >> 16 ) & 0xFF;
+	String[length+3] = ( mic >> 24 ) & 0xFF;
+	return String;
+}
+
+static void sessionCallback(){
+//	UartPutBuffer(&Uart1, )
+}

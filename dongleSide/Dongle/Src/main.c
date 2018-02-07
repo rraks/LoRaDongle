@@ -22,6 +22,7 @@
 #include "uart-board.h"
 #include "Commissioning.h"
 #include "base64.h"
+#include "priorityQ.h"
 
 /*!
  * Defines the application data transmission duty cycle. 5s, value in [ms].
@@ -157,7 +158,8 @@ static enum eDeviceState
 	DEVICE_STATE_JOIN,
 	DEVICE_STATE_SEND,
 	DEVICE_STATE_CYCLE,
-	DEVICE_STATE_SLEEP
+	DEVICE_STATE_SLEEP,
+	DEVICE_STATE_ANTICIPATE_DATA
 }DeviceState;
 
 static enum eDonglState
@@ -195,13 +197,25 @@ uint8_t rxBuffer[100];
 uint8_t decryptBuffer[100];
 uint8_t payloadBuffer[100];
 uint8_t msgBuffer[100];
+uint8_t rxdID[6];
+uint8_t rxIDBuf[6];
+uint8_t Buffer[100];
+uint8_t IDBuffer[100];
 uint8_t QBuffer[100];
+uint8_t pushBuffer[100];
+uint8_t compID[100];
 uint8_t authString[14];
 uint8_t encString[15];
+uint8_t encID[15];
+uint8_t encPort[15];
 uint8_t b64EncString[20];
+uint8_t b64EncID[15];
+uint8_t b64EncPort[15];
 uint8_t *addrString;
 uint8_t flag = 0;
+uint8_t dataRx = 0;
 uint8_t sessionEstd = 0;
+uint8_t portNum;
 
 uint16_t msgLen = 0;
 uint16_t b64Len = 0;
@@ -213,18 +227,18 @@ uint32_t micRx = 0;
 
 
 static TimerEvent_t sessionTimer;
+static TimerEvent_t estbSessionTimer;
 
 
 void UartISR(UartNotifyId_t id);
 uint8_t shuffleStr(uint8_t *dp, uint16_t length, uint16_t shuffleIdx);
 uint8_t isArrEq(uint8_t *authString, uint8_t *actString, uint16_t length);
-uint8_t appendMic(uint8_t *String, uint32_t mic, uint16_t length);
+void appendMic(uint8_t *String, uint32_t mic, uint16_t length);
 uint32_t calcMic(uint8_t *buffer, uint16_t length);
 
 
-
-
 static void sessionCallback();
+static void estbSessionCallback();
 
 
 /*!f
@@ -599,16 +613,37 @@ int main(void) {
 	FifoInit(&Uart1.FifoTx, txBuffer, 100);
 	FifoInit(&Uart1.FifoRx, rxBuffer, 100);
 
+	TokenList *priorityList = malloc(sizeof(TokenList));
+//	priorityList->next = NULL;
+//	priorityList->priority = 0;
+//	priorityList->port = 0;
+
+
 	UartInit(&Uart1, 0, UART_TX, UART_RX);
 	Uart1.IrqNotify = UartISR;
 
 	UartConfig(&Uart1, RX_TX, 115200, UART_8_BIT, UART_1_STOP_BIT, NO_PARITY,
 			NO_FLOW_CTRL);
 
+//	DeviceState = DEVICE_STATE_INIT;
+
+//	FifoFlush(&Uart1.FifoRx);
+//	FifoFlush(&Uart1.FifoTx);
+
+	TimerInit(&sessionTimer, sessionCallback);
+	TimerSetValue(&sessionTimer, 500);
+	TimerStart(&sessionTimer);
+
+	TimerInit(&estbSessionTimer, estbSessionCallback);
+	TimerSetValue(&estbSessionTimer, 500);
+	TimerStart(&estbSessionTimer);
+
+	DongleState = DONGLE_STATE_INIT;
 	DeviceState = DEVICE_STATE_INIT;
 
 	FifoFlush(&Uart1.FifoRx);
 	FifoFlush(&Uart1.FifoTx);
+
 
 	while (1) {
 
@@ -656,36 +691,35 @@ int main(void) {
 						DonglePayloadDecrypt(decryptBuffer, 6, key, 0, 0, 0, msgBuffer);
 							if(isArrEq(msgBuffer,actString, 6)){
 							sessionEstd = 1;
+							memcpy(rxdID, msgBuffer, 6);
 						}
 					}
 				}
-				DongleState = DONGLE_ENQUEUE;
+				DongleState = DONGLE_STATE_WAIT;
 			}
 		}
-		else
-		DongleState = DONGLE_STATE_WAIT;
 		break;
 		}
 	case DONGLE_ENQUEUE: {
-		addrString = appendMic("address", micRx, 4);
-		UartPutBuffer(&Uart1,addrString, 4);
-		// ------ //
-		msgLen = 0;
-		UartGetBuffer(&Uart1, QBuffer, 100, &msgLen);
-		pushQ(QBuffer, QBuffer[msgLen-1]);
-		if("cond" == 1)
+		UartGetBuffer(&Uart1, Buffer, 100, &msgLen);
+		b64Len = 0;
+		b64Len = b64_decode(Buffer,msgLen-1,QBuffer);
+		micRx = 0;
+		micRx = calcMic(QBuffer,b64Len);
+		DongleComputeMic(QBuffer, b64Len-4, key, address, 0, 0, &mic);
+
+		if(mic == micRx){
+			DonglePayloadDecrypt(QBuffer, 5, key, 0, 0, 0, pushBuffer);
+			pushQ(priorityList, pushBuffer[1], pushBuffer[0]);
 			DongleState = DONGLE_STATE_WAIT;
-		else
-			DongleState = DONGLE_DEQUEUE;
+		}
 		break;
-	}
-	case DONGLE_DEQUEUE: {
-		popQ();
-		break;
-	}
+}
+//	case DONGLE_DEQUEUE: {
+////		popQ();
+//		break;
+//	}
 	case DONGLE_STATE_WAIT: {
-		HAL_Delay(100);
-		DongleState = DONGLE_STATE_INIT;
 		break;
 		}
 	default: {
@@ -799,7 +833,16 @@ int main(void) {
 		case DEVICE_STATE_SEND: {
 
 			if (NextTx == true) {
-				PrepareTxFrame(AppPort);
+				portNum = popQ(&priorityList);
+				DonglePayloadEncrypt(portNum, 8, key, 0, 0, 0, encPort);
+				micRx = 0;
+				DongleComputeMic(encPort, 8, key, 0, 0, 0, &micRx);
+				appendMic(encPort, micRx, 8);
+				b64Len = b64_encode(encPort, 12, b64EncPort);
+				b64EncPort[b64Len] = 10;
+				UartPutBuffer(&Uart1, b64EncPort, b64Len+1);
+				HAL_Delay(500);
+/*????????*/	DeviceState = DEVICE_STATE_ANTICIPATE_DATA;
 
 				NextTx = SendFrame();
 			}
@@ -838,7 +881,11 @@ int main(void) {
 void UartISR(UartNotifyId_t id) {
 
 	if (id == UART_NOTIFY_RX) {
+		if (DongleState == DONGLE_STATE_WAIT)
+			DongleState = DONGLE_ENQUEUE;
 		flag = 1;
+		if (DeviceState == DEVICE_STATE_ANTICIPATE_DATA)
+			dataRx = 1;
 		UartReEnableRx();
 	}
 
@@ -882,14 +929,43 @@ uint32_t calcMic(uint8_t *buffer, uint16_t length){
 	return compMic;
 }
 
-uint8_t appendMic(uint8_t *String, uint32_t mic, uint16_t length){
+void appendMic(uint8_t *String, uint32_t mic, uint16_t length){
 	String[length] = mic & 0xFF;
 	String[length+1] = ( mic >> 8 ) & 0xFF;
 	String[length+2] = ( mic >> 16 ) & 0xFF;
 	String[length+3] = ( mic >> 24 ) & 0xFF;
-	return String;
 }
 
 static void sessionCallback(){
-//	UartPutBuffer(&Uart1, )
+	DonglePayloadEncrypt(actString, 8, key, 0, 0, 0, encID);
+	micRx = 0;
+	DongleComputeMic(encID, 8, key, 0, 0, 0, &micRx);
+	appendMic(encID, micRx, 8);
+	b64Len = b64_encode(encID, 12, b64EncID);
+	b64EncID[b64Len] = 10;
+	UartPutBuffer(&Uart1, b64EncID, b64Len+1);
+	TimerStop(&sessionTimer);
+	TimerStart(&sessionTimer);
+}
+
+static void estbSessionCallback(){
+	uint16_t len;
+	UartGetBuffer(&Uart1, rxIDBuf, 100, &len);
+	b64Len = 0;
+	b64Len = b64_decode(rxIDBuf,len-1,IDBuffer);
+	micRx = 0;
+	micRx = calcMic(IDBuffer,b64Len);
+	DongleComputeMic(IDBuffer, b64Len-4, key, address, 0, 0, &mic);
+	if(mic == micRx){
+		DonglePayloadDecrypt(IDBuffer, 6, key, 0, 0, 0, compID);
+			if(isArrEq(rxdID, compID, 6)){
+					TimerStop(&estbSessionTimer);
+					TimerStart(&estbSessionTimer);
+			}
+	}
+	else{
+//		"sessionFail" = 1;
+	}
+
+
 }
